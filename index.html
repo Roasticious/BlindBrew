@@ -553,6 +553,7 @@ function parseWeightPacket(bytes) {
 }
 
 function onWeightNotify(event) {
+  lastPacketTime = performance.now();
   const bytes = new Uint8Array(event.target.value.buffer);
   const packetType = bytes[1];
   if (packetType !== 0x0B) {
@@ -581,6 +582,39 @@ async function sendCommand(dataBytes) {
   await commandChar.writeValue(packet);
 }
 
+let isConnected = false;
+let lastPacketTime = 0;
+let lostContactAlerted = false;
+
+// Single place that resets everything to a safe, silent state — called from
+// both the real disconnect event and the watchdog below, so audio can never
+// be left running no matter which path detects the scale is gone.
+function handleGoneQuiet(reason) {
+  setRateTone(150, 0);
+  setProxContinuous(false);
+  isConnected = false;
+  timerRunning = false;
+  document.getElementById('status').innerHTML = `${reason} <span class="flag bad">reconnect needed</span>`;
+  document.getElementById('tareBtn').disabled = true;
+  document.getElementById('startStopBtn').disabled = true;
+  document.getElementById('readNowBtn').disabled = true;
+  document.getElementById('startStopBtn').textContent = 'Start';
+  if (keepAliveTimer) clearInterval(keepAliveTimer);
+}
+
+// Web Bluetooth's disconnect event isn't reliable for a physical power-off
+// (long-press shutdown) — it may fire late or not at all, leaving any
+// running oscillator on forever. This watches for data simply stopping.
+setInterval(() => {
+  if (isConnected && lastPacketTime && performance.now() - lastPacketTime > 3000) {
+    if (!lostContactAlerted) {
+      lostContactAlerted = true;
+      handleGoneQuiet('Lost contact with the scale — it may have powered off.');
+      speak('Scale disconnected.');
+    }
+  }
+}, 1000);
+
 async function connect() {
   try {
     device = await navigator.bluetooth.requestDevice({
@@ -594,6 +628,9 @@ async function connect() {
     commandChar = await service.getCharacteristic(COMMAND_CHAR);
     await weightChar.startNotifications();
     weightChar.addEventListener('characteristicvaluechanged', onWeightNotify);
+    isConnected = true;
+    lastPacketTime = performance.now();
+    lostContactAlerted = false;
 
     // BooKoo's own docs recommend periodically resetting the auto-shutdown
     // countdown rather than waiting for the last packet before it powers off.
@@ -602,12 +639,10 @@ async function connect() {
     keepAliveTimer = setInterval(() => { sendCommand([0x25, 0x00, 0x00]).catch(() => {}); }, 60000);
 
     device.addEventListener('gattserverdisconnected', () => {
-      document.getElementById('status').innerHTML = 'Scale disconnected. <span class="flag bad">reconnect needed</span>';
+      if (lostContactAlerted) return; // watchdog already handled it
+      lostContactAlerted = true;
+      handleGoneQuiet('Scale disconnected.');
       speak('Scale disconnected.');
-      document.getElementById('tareBtn').disabled = true;
-      document.getElementById('startStopBtn').disabled = true;
-      document.getElementById('readNowBtn').disabled = true;
-      if (keepAliveTimer) clearInterval(keepAliveTimer);
     });
 
     document.getElementById('status').innerHTML = `Connected to ${device.name || 'scale'}. <span class="flag ok">live</span>`;
