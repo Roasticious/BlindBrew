@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V60 Pour Trainer — Bookoo Scale</title>
+<style>
+  :root {
+    --bg: #10141a;
+    --panel: #1a2028;
+    --accent: #ffb84d;
+    --good: #4dd07a;
+    --bad: #ff5d5d;
+    --text: #eef1f5;
+    --muted: #8a94a3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; }
+  button {
+    font-size: 1.1rem;
+    padding: 16px 20px;
+    border-radius: 12px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    width: 100%;
+    margin-bottom: 10px;
+  }
+  .primary { background: var(--accent); color: #10141a; }
+  .secondary { background: #2a3240; color: var(--text); }
+  .danger { background: var(--bad); color: white; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .panel {
+    background: var(--panel);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .big-weight {
+    font-size: 3rem;
+    font-weight: 700;
+    text-align: center;
+    margin: 4px 0;
+  }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+  input[type=number], select {
+    width: 100%;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid #33404f;
+    background: #0e1319;
+    color: var(--text);
+    font-size: 1rem;
+    margin-bottom: 10px;
+  }
+  .stage {
+    border: 1px solid #2a3240;
+    border-radius: 10px;
+    padding: 10px;
+    margin-bottom: 10px;
+  }
+  .stage.active { border-color: var(--accent); background: #201a10; }
+  #status { font-size: 0.95rem; min-height: 1.4em; }
+  #diag { font-family: monospace; font-size: 0.72rem; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+  .flag { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.75rem; margin-left: 6px; }
+  .flag.ok { background: rgba(77,208,122,0.15); color: var(--good); }
+  .flag.bad { background: rgba(255,93,93,0.15); color: var(--bad); }
+  details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<h1>V60 Pour Trainer</h1>
+<div class="sub">Bookoo Ultra scale, prototype build. Requires Chrome/Edge on Android or desktop. Web Bluetooth needs HTTPS or localhost.</div>
+
+<div class="panel">
+  <button id="connectBtn" class="primary">Connect to scale</button>
+  <button id="tareBtn" class="secondary" disabled>Tare</button>
+  <button id="startStopBtn" class="secondary" disabled>Start</button>
+  <button id="readNowBtn" class="secondary" disabled>Speak current weight now</button>
+  <div id="status" role="status" aria-live="polite">Not connected.</div>
+  <div id="voiceDiag" style="font-family:monospace; font-size:0.7rem; color:var(--muted); margin-top:6px;"></div>
+</div>
+
+<div class="panel">
+  <div class="big-weight" id="weightDisplay" aria-hidden="true">-- g</div>
+  <div style="text-align:center; color:var(--muted);" id="rateDisplay" aria-hidden="true">-- g/s</div>
+</div>
+
+<div class="panel">
+  <strong>Sounds (isolate one at a time for training)</strong>
+  <div class="row"><label><input type="checkbox" id="toggleRate" checked> Flow-rate coaching tone</label></div>
+  <div class="row"><label><input type="checkbox" id="toggleProximity" checked> Target-proximity tone</label></div>
+  <div class="row"><label><input type="checkbox" id="toggleSeconds" checked> Second ticks</label></div>
+  <div class="row"><label><input type="checkbox" id="toggleLandmark" checked> Landmark chime (every 30s)</label></div>
+</div>
+
+<div class="panel">
+  <strong>Recipe stages</strong>
+  <div class="sub">Target = cumulative weight to reach by end of that stage. Rate band = acceptable flow rate while pouring in that stage.</div>
+  <label for="toleranceSelect">Target precision (accept target ± this many grams)</label>
+  <select id="toleranceSelect">
+    <option value="1">± 1 g</option>
+    <option value="2" selected>± 2 g</option>
+    <option value="3">± 3 g</option>
+    <option value="4">± 4 g</option>
+    <option value="5">± 5 g</option>
+  </select>
+  <div id="stageList"></div>
+  <button id="addStageBtn" class="secondary">Add stage</button>
+</div>
+
+<details class="panel">
+  <summary>Dev tuning (live audio adjustment)</summary>
+  <div class="sub">Changes apply immediately, pour or tap to hear them.</div>
+
+  <strong>Flow-rate coaching tone</strong>
+  <div class="row"><label for="rateLowMin">Lowest pitch, fully stopped (Hz): <span id="rateLowMinVal"></span></label></div>
+  <input type="range" id="rateLowMin" min="40" max="150" step="5">
+  <div class="row"><label for="rateLowEdge">Pitch at band edge (Hz): <span id="rateLowEdgeVal"></span></label></div>
+  <input type="range" id="rateLowEdge" min="150" max="400" step="10">
+  <div class="row"><label for="rateHighBase">"Too fast" base pitch (Hz): <span id="rateHighBaseVal"></span></label></div>
+  <input type="range" id="rateHighBase" min="250" max="500" step="10">
+  <div class="row"><label for="rateVol">Coaching volume: <span id="rateVolVal"></span></label></div>
+  <input type="range" id="rateVol" min="0.2" max="2" step="0.1">
+
+  <strong>Target-proximity tone</strong>
+  <div class="row"><label for="proxWindow">Proximity window (g before target): <span id="proxWindowVal"></span></label></div>
+  <input type="range" id="proxWindow" min="5" max="30" step="1">
+  <div class="row"><label for="proxLead">Continuous-zone lead time (s): <span id="proxLeadVal"></span></label></div>
+  <input type="range" id="proxLead" min="0.5" max="5" step="0.1">
+  <div class="row"><label for="proxLow">Entry pitch (Hz): <span id="proxLowVal"></span></label></div>
+  <input type="range" id="proxLow" min="300" max="900" step="10">
+  <div class="row"><label for="proxHigh">Pitch at target (Hz): <span id="proxHighVal"></span></label></div>
+  <input type="range" id="proxHigh" min="800" max="1600" step="10">
+  <div class="row"><label for="proxVol">Proximity volume: <span id="proxVolVal"></span></label></div>
+  <input type="range" id="proxVol" min="0.2" max="2" step="0.1">
+
+  <strong>Audio clock</strong>
+  <div class="row"><label for="clockTickHz">Second-tick pitch (Hz): <span id="clockTickHzVal"></span></label></div>
+  <input type="range" id="clockTickHz" min="1000" max="3000" step="50">
+  <div class="row"><label for="clockTickVol">Second-tick volume: <span id="clockTickVolVal"></span></label></div>
+  <input type="range" id="clockTickVol" min="0.01" max="0.15" step="0.01">
+  <div class="row"><label for="clockLandmark">Landmark chime every (s): <span id="clockLandmarkVal"></span></label></div>
+  <input type="range" id="clockLandmark" min="10" max="60" step="5">
+  <div class="row"><label for="clockVol">Landmark chime volume: <span id="clockVolVal"></span></label></div>
+  <input type="range" id="clockVol" min="0.2" max="2" step="0.1">
+</details>
+
+<details class="panel">
+  <summary>Diagnostics (protocol calibration)</summary>
+  <div id="diag">Waiting for data...</div>
+</details>
+
+<script>
+// ---- Protocol constants (BooKoo Mini-documented layout, used as working
+// hypothesis for the Ultra scale; validated live via checksum below) ----
+const SERVICE_UUID   = '00000ffe-0000-1000-8000-00805f9b34fb';
+const WEIGHT_CHAR     = '0000ff11-0000-1000-8000-00805f9b34fb';
+const COMMAND_CHAR    = '0000ff12-0000-1000-8000-00805f9b34fb';
+
+let device, server, weightChar, commandChar;
+let checksumOkCount = 0, checksumBadCount = 0;
+let keepAliveTimer = null;
+
+// ---- State ----
+let currentWeight = 0;
+let currentFlowRate = 0;
+let stages = [
+  { label: 'Bloom',     target: 45,  minRate: 4.5, maxRate: 5.0 },
+  { label: 'Main pour', target: 180, minRate: 3.0, maxRate: 4.0 },
+  { label: 'Final pour',target: 250, minRate: 2.0, maxRate: 3.0 }
+];
+let activeStageIndex = 0;
+let stageAdvancedFlag = false;   // prevents repeat "target reached" chime
+let overshootFired = false;
+let lastSpokenWeight = null;
+let stableSince = null;
+const STABLE_WINDOW_MS = 1500;
+const STABLE_EPSILON_G = 0.15;
+let weightHistory = []; // {t, w}
+let targetTolerance = 2; // grams; user-adjustable, 1-5
+let offScaleAlerted = false; // avoid repeating the negative-weight alert every packet
+let lastAnnouncedSecond = -1; // drives the seconds/minutes audio clock
+let timerRunning = false;
+
+// ---- Sound toggles, for isolating one feature at a time during training ----
+let soundOn = { rate: true, proximity: true, seconds: true, landmark: true };
+
+// ---- Tunable sound parameters (live-adjustable via the Dev tuning panel) ----
+let RATE_LOW_MIN_HZ = 70, RATE_LOW_EDGE_HZ = 200, RATE_HIGH_BASE_HZ = 320, RATE_VOL_MULT = 1.0;
+let PROX_WINDOW_G = 20, PROX_LEAD_S = 2.2, PROX_LOW_HZ = 700, PROX_HIGH_HZ = 1200, PROX_VOL_MULT = 1.0;
+let CLOCK_TICK_HZ = 2200, CLOCK_TICK_VOL = 0.05, CLOCK_LANDMARK_S = 30, CLOCK_VOL_MULT = 1.0;
+
+// ---- Audio engine ----
+const actx = new (window.AudioContext || window.webkitAudioContext)();
+let rateOsc = null, rateGain = null;
+let proxOsc = null, proxGain = null;
+
+function ensureRateOsc() {
+  if (rateOsc) return;
+  rateOsc = actx.createOscillator();
+  rateGain = actx.createGain();
+  rateGain.gain.value = 0;
+  rateOsc.type = 'sine';
+  rateOsc.frequency.value = 90;
+  rateOsc.connect(rateGain).connect(actx.destination);
+  rateOsc.start();
+}
+
+function setRateTone(freq, gain) {
+  ensureRateOsc();
+  const now = actx.currentTime;
+  rateOsc.frequency.setTargetAtTime(freq, now, 0.05);
+  rateGain.gain.setTargetAtTime(gain, now, 0.05);
+}
+
+function ensureProxOsc() {
+  if (proxOsc) return;
+  proxOsc = actx.createOscillator();
+  proxGain = actx.createGain();
+  proxGain.gain.value = 0;
+  proxOsc.type = 'triangle'; // warmer than square
+  proxOsc.frequency.value = 700;
+  proxOsc.connect(proxGain).connect(actx.destination);
+  proxOsc.start();
+}
+
+function setProxContinuous(on, freq) {
+  ensureProxOsc();
+  const now = actx.currentTime;
+  if (on && freq) proxOsc.frequency.setTargetAtTime(freq, now, 0.08);
+  proxGain.gain.setTargetAtTime(on ? 0.12 * PROX_VOL_MULT : 0, now, 0.03);
+}
+
+function playClick(freq, duration = 0.05, type = 'square', vol = 0.15) {
+  const osc = actx.createOscillator();
+  const gain = actx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.value = vol;
+  osc.connect(gain).connect(actx.destination);
+  osc.start();
+  gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + duration);
+  osc.stop(actx.currentTime + duration + 0.02);
+}
+
+function playSuccessChime() {
+  playClick(880, 0.12, 'sine', 0.2);
+  setTimeout(() => playClick(1320, 0.15, 'sine', 0.2), 90);
+}
+
+function playOvershootAlarm() {
+  playClick(220, 0.25, 'sawtooth', 0.2);
+}
+
+let currentUtterance = null;
+let voicesReady = (speechSynthesis.getVoices() || []).length > 0;
+let preferredVoice = null;
+let speechUnlocked = false;
+let utteranceStartedAt = 0;
+
+function pickVoice() {
+  const voices = speechSynthesis.getVoices() || [];
+  preferredVoice = voices.find(v => v.name === 'Google US English')
+    || voices.find(v => v.lang && v.lang.startsWith('en'))
+    || voices[0] || null;
+}
+pickVoice(); // in case voices are already loaded synchronously
+speechSynthesis.addEventListener('voiceschanged', () => {
+  voicesReady = (speechSynthesis.getVoices() || []).length > 0;
+  pickVoice();
+  updateVoiceDiag();
+});
+
+// Chrome requires speechSynthesis to be unlocked by a silent utterance fired
+// directly inside a user gesture, or later programmatic speak() calls (e.g.
+// from a BLE notification callback) can silently do nothing. Confirmed
+// working pattern from Gregory's cupping-timer app.
+function unlockSpeech() {
+  if (speechUnlocked) return;
+  speechUnlocked = true;
+  const u = new SpeechSynthesisUtterance(' '); // a single space, not '' — an empty-string utterance can get stuck in some Chrome builds and never fire its end event
+  u.volume = 0;
+  utteranceStartedAt = performance.now();
+  u.onend = () => { utteranceStartedAt = 0; };
+  u.onerror = () => { utteranceStartedAt = 0; };
+  speechSynthesis.speak(u);
+}
+
+function updateVoiceDiag() {
+  const el = document.getElementById('voiceDiag');
+  if (!el) return;
+  el.textContent = `voices loaded: ${speechSynthesis.getVoices().length}   selected: ${preferredVoice ? preferredVoice.name : 'none'}   unlocked: ${speechUnlocked}   speaking: ${speechSynthesis.speaking}   pending: ${speechSynthesis.pending}   paused: ${speechSynthesis.paused}`;
+}
+setInterval(updateVoiceDiag, 1000);
+
+function speak(text) {
+  const go = () => {
+    currentUtterance = new SpeechSynthesisUtterance(text); // kept in a persistent var so Chrome can't GC it mid-utterance
+    currentUtterance.rate = 1.0;
+    if (preferredVoice) currentUtterance.voice = preferredVoice;
+    utteranceStartedAt = performance.now();
+    currentUtterance.onend = () => { utteranceStartedAt = 0; };
+    currentUtterance.onerror = () => { utteranceStartedAt = 0; };
+    speechSynthesis.speak(currentUtterance);
+  };
+  if (speechSynthesis.speaking || speechSynthesis.pending) {
+    speechSynthesis.cancel();
+    setTimeout(go, 60); // give Chrome's engine a tick to actually process the cancel first
+  } else {
+    go();
+  }
+}
+// Chrome has two known failure modes here: (1) it silently auto-pauses after
+// inactivity, and (2) its queue can get wedged reporting "speaking" forever
+// with no audio and nothing else able to speak. Both are worked around by a
+// periodic watchdog rather than trusting the flags at call time.
+setInterval(() => {
+  if (speechSynthesis.paused) speechSynthesis.resume();
+  if (utteranceStartedAt && performance.now() - utteranceStartedAt > 8000) {
+    speechSynthesis.cancel(); // force-clear a wedged utterance; our phrases are all well under 8s
+    utteranceStartedAt = 0;
+  }
+}, 2000);
+
+// ---- Audio clock: quiet tick every second, distinct chime every minute.
+// Driven by the scale's own onboard elapsed-time field, not a local JS
+// timer, so it can't drift out of sync with when the pour actually started.
+function formatSpokenTime(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  if (m === 0) return `${s} seconds`;
+  if (s === 0) return `${m} minute${m > 1 ? 's' : ''}`;
+  return `${m} minute${m > 1 ? 's' : ''} ${s} seconds`;
+}
+
+function updateClock(elapsedMs) {
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  if (totalSeconds === lastAnnouncedSecond) return;
+  if (totalSeconds < lastAnnouncedSecond) { lastAnnouncedSecond = totalSeconds; return; } // timer was reset; resync silently
+  lastAnnouncedSecond = totalSeconds;
+  if (totalSeconds > 0 && totalSeconds % CLOCK_LANDMARK_S === 0) {
+    if (soundOn.landmark) {
+      playClick(1500, 0.08, 'sine', 0.12 * CLOCK_VOL_MULT);
+      setTimeout(() => playClick(1900, 0.10, 'sine', 0.12 * CLOCK_VOL_MULT), 110);
+      speak(formatSpokenTime(totalSeconds));
+    }
+  } else if (soundOn.seconds) {
+    playClick(CLOCK_TICK_HZ, 0.025, 'sine', CLOCK_TICK_VOL); // subtle, high, out of the way of the coaching tones
+  }
+}
+
+// ---- Proximity tick scheduling (radar-style: ticks accelerate, then solid tone) ----
+let lastTickTime = 0;
+function updateProximity(remaining, isPouring) {
+  if (!soundOn.proximity) { setProxContinuous(false); return; }
+  const PROXIMITY_WINDOW = PROX_WINDOW_G;   // grams before target where discrete ticks can start
+  const CONTINUOUS_TIME_S = PROX_LEAD_S;    // switch to a continuous tone this many seconds before impact, at current speed
+  const MIN_CONTINUOUS_ZONE = Math.max(3, targetTolerance * 1.5); // gram-based floor, used when barely moving
+
+  if (!isPouring || remaining <= 0 || remaining > PROXIMITY_WINDOW) {
+    setProxContinuous(false);
+    return;
+  }
+
+  const timeToTarget = currentFlowRate > 0.3 ? remaining / currentFlowRate : Infinity;
+  const dynamicZone = Math.max(MIN_CONTINUOUS_ZONE, currentFlowRate * CONTINUOUS_TIME_S);
+
+  if (timeToTarget <= CONTINUOUS_TIME_S || remaining <= MIN_CONTINUOUS_ZONE) {
+    // Rising pitch as she gets closer: PROX_LOW_HZ on entry, up to PROX_HIGH_HZ right at target
+    const closeness = 1 - Math.min(remaining / dynamicZone, 1);
+    setProxContinuous(true, PROX_LOW_HZ + closeness * (PROX_HIGH_HZ - PROX_LOW_HZ));
+    return;
+  }
+
+  setProxContinuous(false);
+  const t = performance.now();
+  const span = PROXIMITY_WINDOW - dynamicZone;
+  const frac = span > 0 ? (remaining - dynamicZone) / span : 0;
+  const interval = 120 + Math.max(0, Math.min(frac, 1)) * 780;
+  if (t - lastTickTime >= interval) {
+    playClick(PROX_LOW_HZ, 0.06, 'triangle', 0.14 * PROX_VOL_MULT); // warm tick, same register as the continuous tone
+    lastTickTime = t;
+  }
+}
+
+// ---- Rate coaching (vario-style): lower register, anchored from 0 g/s ----
+function updateRateTone(stage, isPouring) {
+  if (!soundOn.rate) { setRateTone(150, 0); return; }
+  if (!isPouring) { setRateTone(150, 0); return; }
+  const { minRate, maxRate } = stage;
+  const deadband = 0.15; // g/s slack before coaching kicks in
+  if (currentFlowRate < minRate - deadband) {
+    // Anchored at flow=0 (deepest, most urgent tone) up to minRate (fading to silence)
+    const frac = Math.min(Math.max(currentFlowRate, 0) / minRate, 1); // 0 at stopped, 1 at minRate
+    const freq = RATE_LOW_MIN_HZ + frac * (RATE_LOW_EDGE_HZ - RATE_LOW_MIN_HZ);
+    const gain = (0.16 - frac * 0.12) * RATE_VOL_MULT; // loudest when barely moving, quiet near band edge
+    setRateTone(freq, gain);
+  } else if (currentFlowRate > maxRate + deadband) {
+    const excess = (currentFlowRate - maxRate);
+    const clipped = Math.min(excess, 5);
+    setRateTone(RATE_HIGH_BASE_HZ + clipped * 60, (0.05 + clipped * 0.02) * RATE_VOL_MULT); // still higher than "too slow", but not shrill
+  } else {
+    setRateTone(150, 0); // in band: silence
+  }
+}
+
+// ---- Main per-packet handler ----
+function handleWeightUpdate(weight, flowRate, elapsedMs) {
+  currentWeight = weight;
+  currentFlowRate = flowRate;
+  document.getElementById('weightDisplay').textContent = weight.toFixed(1) + ' g';
+  document.getElementById('rateDisplay').textContent = flowRate.toFixed(2) + ' g/s';
+  if (typeof elapsedMs === 'number') updateClock(elapsedMs);
+
+  // Off-scale guard: a real negative reading (vessel lifted after taring) is
+  // not a pour, and target/overshoot math on it would be meaningless. Mute
+  // coaching audio, alert once, and skip the rest of the pour logic until
+  // the weight comes back to something physically sane.
+  if (weight < -1) {
+    setRateTone(150, 0);
+    setProxContinuous(false);
+    if (!offScaleAlerted) {
+      offScaleAlerted = true;
+      speak(`Scale reading negative, ${Math.abs(weight).toFixed(0)} grams. Check the vessel is on the scale.`);
+    }
+    return;
+  }
+  offScaleAlerted = false;
+
+  const isPouring = Math.abs(flowRate) > 0.3;
+  const stage = stages[activeStageIndex];
+
+  if (stage) {
+    updateRateTone(stage, isPouring);
+    const remaining = stage.target - weight;
+    updateProximity(remaining, isPouring);
+
+    const withinTolerance = Math.abs(weight - stage.target) <= targetTolerance;
+    const pastTolerance = weight > stage.target + targetTolerance;
+
+    if (!stageAdvancedFlag && (withinTolerance || pastTolerance)) {
+      stageAdvancedFlag = true;
+      setProxContinuous(false);
+      if (pastTolerance) playOvershootAlarm(); else playSuccessChime();
+
+      const verdictPrefix = pastTolerance ? 'Overshot, ' : '';
+      if (activeStageIndex < stages.length - 1) {
+        const next = stages[activeStageIndex + 1];
+        speak(`${verdictPrefix}${weight.toFixed(1)} grams. ${next.label}, ${next.target} grams.`);
+        activeStageIndex++;
+        stageAdvancedFlag = false;
+        renderStages();
+      } else {
+        speak(`${verdictPrefix}${weight.toFixed(1)} grams. Final stage done.`);
+      }
+    }
+  }
+
+  // Stabilization tracking for spoken confirmation
+  const now = performance.now();
+  weightHistory.push({ t: now, w: weight });
+  weightHistory = weightHistory.filter(p => now - p.t < STABLE_WINDOW_MS + 200);
+  const windowStart = weightHistory.find(p => now - p.t <= STABLE_WINDOW_MS);
+  if (windowStart && Math.abs(weight - windowStart.w) < STABLE_EPSILON_G) {
+    if (lastSpokenWeight === null || Math.abs(weight - lastSpokenWeight) > STABLE_EPSILON_G) {
+      lastSpokenWeight = weight;
+      speak(`${weight.toFixed(1)} grams.`);
+    }
+  } else {
+    lastSpokenWeight = null; // weight moved again, allow re-announce next time it settles
+  }
+}
+
+// ---- BLE parsing: official BooKoo Ultra protocol (confirmed from vendor docs) ----
+function parseWeightPacket(bytes) {
+  const n = bytes.length;
+  let xor = 0;
+  for (let i = 0; i < n - 1; i++) xor ^= bytes[i];
+  const checksumOk = xor === bytes[n - 1];
+  checksumOk ? checksumOkCount++ : checksumBadCount++;
+
+  // Confirmed offsets from BooKoo's official Ultra protocol doc. The sign-byte
+  // VALUE convention isn't numerically specified there (just "(+/-)"), so this
+  // is still a best guess pending a real hex reading from the diagnostics panel
+  // in both a positive and a genuine negative state.
+  const elapsedMs = (bytes[2] << 16) | (bytes[3] << 8) | bytes[4];
+  const weightSignByte = bytes[6];
+  const weightSign = weightSignByte === 0 ? -1 : 1;
+  const weightMag = ((bytes[7] << 16) | (bytes[8] << 8) | bytes[9]) / 100;
+  const flowSignByte = bytes[10];
+  const flowSign = flowSignByte === 0 ? -1 : 1;
+  const flowMag = ((bytes[11] << 8) | bytes[12]) / 100;
+  const battery = bytes[13];
+
+  document.getElementById('diag').textContent =
+    `bytes: ${Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join(' ')}\n` +
+    `checksum: ${checksumOk ? 'OK' : 'MISMATCH'}  (ok:${checksumOkCount} bad:${checksumBadCount})\n` +
+    `weight sign byte: 0x${weightSignByte.toString(16)} (${weightSignByte})   flow sign byte: 0x${flowSignByte.toString(16)} (${flowSignByte})\n` +
+    `elapsed: ${(elapsedMs/1000).toFixed(1)}s   battery: ${battery}%`;
+
+  return { weight: weightSign * weightMag, flowRate: flowSign * flowMag, checksumOk, elapsedMs };
+}
+
+function onWeightNotify(event) {
+  const bytes = new Uint8Array(event.target.value.buffer);
+  const packetType = bytes[1];
+  if (packetType !== 0x0B) {
+    // 0x0D = automatic-mode event, 0x0F = powder-weight response. Different
+    // field layout entirely; parsing them as a weight packet would produce
+    // garbage. We don't use automatic mode, so just ignore these for now.
+    document.getElementById('diag').textContent = `Ignored non-weight packet, type 0x${packetType.toString(16)}`;
+    return;
+  }
+  const { weight, flowRate, checksumOk, elapsedMs } = parseWeightPacket(bytes);
+  if (!checksumOk && checksumBadCount > 5 && checksumOkCount === 0) {
+    document.getElementById('status').innerHTML =
+      'Checksum consistently failing on weight packets. <span class="flag bad">check diagnostics</span>';
+    return;
+  }
+  handleWeightUpdate(weight, flowRate, elapsedMs);
+}
+
+async function sendCommand(dataBytes) {
+  // dataBytes = [d1, d2, d3]
+  const header = [0x03, 0x0A];
+  const payload = header.concat(dataBytes);
+  let xor = 0;
+  payload.forEach(b => xor ^= b);
+  const packet = new Uint8Array(payload.concat([xor]));
+  await commandChar.writeValue(packet);
+}
+
+async function connect() {
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+      optionalServices: [SERVICE_UUID]
+    });
+    document.getElementById('status').textContent = `Connecting to ${device.name || 'scale'}...`;
+    server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    weightChar = await service.getCharacteristic(WEIGHT_CHAR);
+    commandChar = await service.getCharacteristic(COMMAND_CHAR);
+    await weightChar.startNotifications();
+    weightChar.addEventListener('characteristicvaluechanged', onWeightNotify);
+
+    // BooKoo's own docs recommend periodically resetting the auto-shutdown
+    // countdown rather than waiting for the last packet before it powers off.
+    // We don't use the scale's automatic mode, so nothing else keeps it awake.
+    if (keepAliveTimer) clearInterval(keepAliveTimer);
+    keepAliveTimer = setInterval(() => { sendCommand([0x25, 0x00, 0x00]).catch(() => {}); }, 60000);
+
+    device.addEventListener('gattserverdisconnected', () => {
+      document.getElementById('status').innerHTML = 'Scale disconnected. <span class="flag bad">reconnect needed</span>';
+      speak('Scale disconnected.');
+      document.getElementById('tareBtn').disabled = true;
+      document.getElementById('startStopBtn').disabled = true;
+      document.getElementById('readNowBtn').disabled = true;
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
+    });
+
+    document.getElementById('status').innerHTML = `Connected to ${device.name || 'scale'}. <span class="flag ok">live</span>`;
+    document.getElementById('tareBtn').disabled = false;
+    document.getElementById('startStopBtn').disabled = false;
+    document.getElementById('readNowBtn').disabled = false;
+  } catch (err) {
+    document.getElementById('status').textContent = 'Connection failed: ' + err.message;
+  }
+}
+
+document.getElementById('connectBtn').addEventListener('click', () => { unlockSpeech(); connect(); });
+
+document.getElementById('toleranceSelect').addEventListener('change', (e) => {
+  targetTolerance = parseFloat(e.target.value);
+});
+
+function bindToggle(id, key) {
+  const el = document.getElementById(id);
+  soundOn[key] = el.checked;
+  el.addEventListener('change', (e) => { soundOn[key] = e.target.checked; });
+}
+bindToggle('toggleRate', 'rate');
+bindToggle('toggleProximity', 'proximity');
+bindToggle('toggleSeconds', 'seconds');
+bindToggle('toggleLandmark', 'landmark');
+
+// ---- Dev tuning sliders: each binds a range input to a tunable variable,
+// updates its live value label, and initializes both from the variable's
+// current default so the panel opens showing what's actually in effect.
+function bindSlider(id, get, set, decimals = 0) {
+  const input = document.getElementById(id);
+  const label = document.getElementById(id + 'Val');
+  const show = (v) => { label.textContent = Number(v).toFixed(decimals); };
+  input.value = get();
+  show(get());
+  input.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    set(v);
+    show(v);
+  });
+}
+bindSlider('rateLowMin',   () => RATE_LOW_MIN_HZ,   v => RATE_LOW_MIN_HZ = v);
+bindSlider('rateLowEdge',  () => RATE_LOW_EDGE_HZ,  v => RATE_LOW_EDGE_HZ = v);
+bindSlider('rateHighBase', () => RATE_HIGH_BASE_HZ, v => RATE_HIGH_BASE_HZ = v);
+bindSlider('rateVol',      () => RATE_VOL_MULT,     v => RATE_VOL_MULT = v, 1);
+bindSlider('proxWindow',   () => PROX_WINDOW_G,     v => PROX_WINDOW_G = v);
+bindSlider('proxLead',     () => PROX_LEAD_S,       v => PROX_LEAD_S = v, 1);
+bindSlider('proxLow',      () => PROX_LOW_HZ,       v => PROX_LOW_HZ = v);
+bindSlider('proxHigh',     () => PROX_HIGH_HZ,      v => PROX_HIGH_HZ = v);
+bindSlider('proxVol',      () => PROX_VOL_MULT,     v => PROX_VOL_MULT = v, 1);
+bindSlider('clockTickHz',  () => CLOCK_TICK_HZ,     v => CLOCK_TICK_HZ = v);
+bindSlider('clockTickVol', () => CLOCK_TICK_VOL,    v => CLOCK_TICK_VOL = v, 2);
+bindSlider('clockLandmark',() => CLOCK_LANDMARK_S,  v => CLOCK_LANDMARK_S = v);
+bindSlider('clockVol',     () => CLOCK_VOL_MULT,    v => CLOCK_VOL_MULT = v, 1);
+
+document.getElementById('tareBtn').addEventListener('click', async () => {
+  unlockSpeech();
+  try {
+    await sendCommand([0x01, 0x00, 0x00]); // tare only
+    speak('Tared.');
+  } catch (err) {
+    document.getElementById('status').textContent = 'Tare command failed: ' + err.message;
+    speak('Tare failed.');
+  }
+});
+
+document.getElementById('startStopBtn').addEventListener('click', async () => {
+  unlockSpeech();
+  const btn = document.getElementById('startStopBtn');
+  try {
+    if (!timerRunning) {
+      await sendCommand([0x04, 0x00, 0x00]); // start timer
+      timerRunning = true;
+      btn.textContent = 'Stop';
+      activeStageIndex = 0;
+      stageAdvancedFlag = false;
+      overshootFired = false;
+      lastSpokenWeight = null;
+      offScaleAlerted = false;
+      lastAnnouncedSecond = -1;
+      renderStages();
+      speak(`${stages[0].label}, ${stages[0].target} grams.`);
+  } else {
+      await sendCommand([0x05, 0x00, 0x00]); // stop timer
+      timerRunning = false;
+      btn.textContent = 'Start';
+      speak('Stopped.');
+    }
+  } catch (err) {
+    document.getElementById('status').textContent = 'Command failed: ' + err.message;
+    speak('Command failed.');
+  }
+});
+
+document.getElementById('readNowBtn').addEventListener('click', () => {
+  unlockSpeech();
+  speak(`${currentWeight.toFixed(1)} grams.`);
+});
+
+// ---- Stage editor ----
+function renderStages() {
+  const container = document.getElementById('stageList');
+  container.innerHTML = '';
+  stages.forEach((s, i) => {
+    const div = document.createElement('div');
+    div.className = 'stage' + (i === activeStageIndex ? ' active' : '');
+    div.innerHTML = `
+      <label>Stage ${i + 1} name</label>
+      <input type="text" value="${s.label}" data-idx="${i}" data-field="label">
+      <div class="row">
+        <div>
+          <label>Target (g)</label>
+          <input type="number" step="1" value="${s.target}" data-idx="${i}" data-field="target">
+        </div>
+        <div>
+          <label>Min rate (g/s)</label>
+          <input type="number" step="0.1" value="${s.minRate}" data-idx="${i}" data-field="minRate">
+        </div>
+        <div>
+          <label>Max rate (g/s)</label>
+          <input type="number" step="0.1" value="${s.maxRate}" data-idx="${i}" data-field="maxRate">
+        </div>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+  container.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('change', (e) => {
+      const idx = +e.target.dataset.idx;
+      const field = e.target.dataset.field;
+      stages[idx][field] = field === 'label' ? e.target.value : parseFloat(e.target.value);
+    });
+  });
+}
+
+document.getElementById('addStageBtn').addEventListener('click', () => {
+  const last = stages[stages.length - 1];
+  stages.push({ label: 'New stage', target: (last ? last.target + 50 : 50), minRate: 3.0, maxRate: 4.0 });
+  renderStages();
+});
+
+renderStages();
+</script>
+</body>
+</html>
