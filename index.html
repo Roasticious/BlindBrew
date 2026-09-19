@@ -186,6 +186,8 @@ let stages = [
 let activeStageIndex = 0;
 let stageAdvancedFlag = false;   // prevents repeat "target reached" chime
 let overshootFired = false;
+let pendingStageCompletion = null; // {index, overshoot} — set on crossing target, consumed once weight settles
+let suppressAutoSpeechUntil = 0; // brief window after Start/Tare/Stop where automatic announcements stay quiet, so the deliberate one is never raced out by a competing speak() call
 let lastSpokenWeight = null;
 let stableSince = null;
 const STABLE_WINDOW_MS = 1500;
@@ -435,7 +437,9 @@ function handleWeightUpdate(weight, flowRate, elapsedMs) {
     setProxContinuous(false);
     if (!offScaleAlerted) {
       offScaleAlerted = true;
-      speak(`Scale reading negative, ${Math.abs(weight).toFixed(0)} grams. Check the vessel is on the scale.`);
+      if (performance.now() > suppressAutoSpeechUntil) {
+        speak(`Scale reading negative, ${Math.abs(weight).toFixed(0)} grams. Check the vessel is on the scale.`);
+      }
     }
     return;
   }
@@ -445,40 +449,61 @@ function handleWeightUpdate(weight, flowRate, elapsedMs) {
   const stage = stages[activeStageIndex];
 
   if (stage) {
-    updateRateTone(stage, isPouring);
-    const remaining = stage.target - weight;
-    updateProximity(remaining, isPouring);
-
-    const withinTolerance = Math.abs(weight - stage.target) <= targetTolerance;
-    const pastTolerance = weight > stage.target + targetTolerance;
-
-    if (!stageAdvancedFlag && (withinTolerance || pastTolerance)) {
-      stageAdvancedFlag = true;
+    if (pendingStageCompletion) {
+      // Target already crossed; waiting for weight to truly settle before
+      // speaking, so we don't announce a number that's still climbing.
+      setRateTone(150, 0);
       setProxContinuous(false);
-      if (pastTolerance) playOvershootAlarm(); else playSuccessChime();
+    } else {
+      updateRateTone(stage, isPouring);
+      const remaining = stage.target - weight;
+      updateProximity(remaining, isPouring);
 
-      const verdictPrefix = pastTolerance ? 'Overshot, ' : '';
-      if (activeStageIndex < stages.length - 1) {
-        const next = stages[activeStageIndex + 1];
-        speak(`${verdictPrefix}${weight.toFixed(1)} grams. ${next.label}, ${next.target} grams.`);
-        activeStageIndex++;
-        stageAdvancedFlag = false;
-        renderStages();
-      } else {
-        speak(`${verdictPrefix}${weight.toFixed(1)} grams. Final stage done.`);
+      const withinTolerance = Math.abs(weight - stage.target) <= targetTolerance;
+      const pastTolerance = weight > stage.target + targetTolerance;
+
+      if (!stageAdvancedFlag && (withinTolerance || pastTolerance)) {
+        stageAdvancedFlag = true;
+        setProxContinuous(false);
+        setRateTone(150, 0);
+        if (pastTolerance) playOvershootAlarm(); else playSuccessChime();
+        // Don't speak yet: wait for the settle-detector below, so the number
+        // announced is the true final weight, not whatever it was the instant
+        // it crossed into tolerance.
+        pendingStageCompletion = { index: activeStageIndex, overshoot: pastTolerance };
       }
     }
   }
 
-  // Stabilization tracking for spoken confirmation
+  // Settle detection: single source of truth for "weight has stopped
+  // moving," used both for stage-completion announcements and the general
+  // on-demand-style readback. Having two independent systems that could each
+  // fire speak() was the cause of one cutting the other off mid-sentence.
   const now = performance.now();
   weightHistory.push({ t: now, w: weight });
   weightHistory = weightHistory.filter(p => now - p.t < STABLE_WINDOW_MS + 200);
   const windowStart = weightHistory.find(p => now - p.t <= STABLE_WINDOW_MS);
   if (windowStart && Math.abs(weight - windowStart.w) < STABLE_EPSILON_G) {
-    if (lastSpokenWeight === null || Math.abs(weight - lastSpokenWeight) > STABLE_EPSILON_G) {
+    if (pendingStageCompletion) {
+      const info = pendingStageCompletion;
+      pendingStageCompletion = null; // consume once; settling can be detected on several consecutive packets
+      const prefix = info.overshoot ? 'Overshot, ' : '';
+      speak(`${prefix}${weight.toFixed(1)} grams.`);
       lastSpokenWeight = weight;
-      speak(`${weight.toFixed(1)} grams.`);
+      setTimeout(() => {
+        if (info.index < stages.length - 1) {
+          const next = stages[info.index + 1];
+          activeStageIndex = info.index + 1;
+          stageAdvancedFlag = false;
+          renderStages();
+          speak(`${next.label}, ${next.target} grams.`);
+        } else {
+          speak('Final stage done.');
+        }
+      }, 5000); // deliberate pause so the two announcements don't run together
+    } else if (lastSpokenWeight === null || Math.abs(weight - lastSpokenWeight) > STABLE_EPSILON_G) {
+      lastSpokenWeight = weight;
+      if (performance.now() > suppressAutoSpeechUntil) speak(`${weight.toFixed(1)} grams.`);
     }
   } else {
     lastSpokenWeight = null; // weight moved again, allow re-announce next time it settles
@@ -495,14 +520,16 @@ function parseWeightPacket(bytes) {
 
   // Confirmed offsets from BooKoo's official Ultra protocol doc. The sign-byte
   // VALUE convention isn't numerically specified there (just "(+/-)"), so this
-  // is still a best guess pending a real hex reading from the diagnostics panel
-  // in both a positive and a genuine negative state.
+  // Confirmed from real hardware: sign byte is literal ASCII '+' (0x2B) or
+  // '-' (0x2D), not a 0/1 flag. My earlier fix checked for ===0, which
+  // happened to work for positive (0x2B is nonzero) but could never detect
+  // a genuine negative (0x2D is also nonzero) — that's why it never worked.
   const elapsedMs = (bytes[2] << 16) | (bytes[3] << 8) | bytes[4];
   const weightSignByte = bytes[6];
-  const weightSign = weightSignByte === 0 ? -1 : 1;
+  const weightSign = weightSignByte === 0x2D ? -1 : 1;
   const weightMag = ((bytes[7] << 16) | (bytes[8] << 8) | bytes[9]) / 100;
   const flowSignByte = bytes[10];
-  const flowSign = flowSignByte === 0 ? -1 : 1;
+  const flowSign = flowSignByte === 0x2D ? -1 : 1;
   const flowMag = ((bytes[11] << 8) | bytes[12]) / 100;
   const battery = bytes[13];
 
@@ -630,7 +657,9 @@ bindSlider('clockVol',     () => CLOCK_VOL_MULT,    v => CLOCK_VOL_MULT = v, 1);
 document.getElementById('tareBtn').addEventListener('click', async () => {
   unlockSpeech();
   try {
-    await sendCommand([0x01, 0x00, 0x00]); // tare only
+    await sendCommand([0x01, 0x00, 0x00]); // tare
+    await sendCommand([0x06, 0x00, 0x00]); // also reset the timer — tare only happens during pre-brew setup, never mid-pour
+    suppressAutoSpeechUntil = performance.now() + 1500;
     speak('Tared.');
   } catch (err) {
     document.getElementById('status').textContent = 'Tare command failed: ' + err.message;
@@ -643,21 +672,25 @@ document.getElementById('startStopBtn').addEventListener('click', async () => {
   const btn = document.getElementById('startStopBtn');
   try {
     if (!timerRunning) {
+      await sendCommand([0x06, 0x00, 0x00]); // reset first — start alone didn't reliably reactivate after a stop
       await sendCommand([0x04, 0x00, 0x00]); // start timer
       timerRunning = true;
       btn.textContent = 'Stop';
       activeStageIndex = 0;
       stageAdvancedFlag = false;
       overshootFired = false;
+      pendingStageCompletion = null;
       lastSpokenWeight = null;
       offScaleAlerted = false;
       lastAnnouncedSecond = -1;
       renderStages();
+      suppressAutoSpeechUntil = performance.now() + 2000;
       speak(`${stages[0].label}, ${stages[0].target} grams.`);
   } else {
       await sendCommand([0x05, 0x00, 0x00]); // stop timer
       timerRunning = false;
       btn.textContent = 'Start';
+      suppressAutoSpeechUntil = performance.now() + 1000;
       speak('Stopped.');
     }
   } catch (err) {
