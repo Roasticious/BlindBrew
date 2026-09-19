@@ -309,17 +309,27 @@ function updateVoiceDiag() {
 }
 setInterval(updateVoiceDiag, 1000);
 
-function speak(text) {
+let currentPriority = 0; // priority of whatever's currently speaking/pending
+
+// priority: higher wins. PRIORITY.TIME (periodic 30s callouts) can be
+// dropped if something PRIORITY.WEIGHT (or higher) is already talking;
+// weight-priority calls always interrupt, as before.
+const PRIORITY = { TIME: 1, WEIGHT: 2 };
+
+function speak(text, priority = PRIORITY.WEIGHT) {
+  const busy = speechSynthesis.speaking || speechSynthesis.pending;
+  if (busy && priority < currentPriority) return; // don't let a lower-priority call interrupt a higher one
   const go = () => {
     currentUtterance = new SpeechSynthesisUtterance(text); // kept in a persistent var so Chrome can't GC it mid-utterance
     currentUtterance.rate = 1.0;
     if (preferredVoice) currentUtterance.voice = preferredVoice;
+    currentPriority = priority;
     utteranceStartedAt = performance.now();
-    currentUtterance.onend = () => { utteranceStartedAt = 0; };
-    currentUtterance.onerror = () => { utteranceStartedAt = 0; };
+    currentUtterance.onend = () => { utteranceStartedAt = 0; currentPriority = 0; };
+    currentUtterance.onerror = () => { utteranceStartedAt = 0; currentPriority = 0; };
     speechSynthesis.speak(currentUtterance);
   };
-  if (speechSynthesis.speaking || speechSynthesis.pending) {
+  if (busy) {
     speechSynthesis.cancel();
     setTimeout(go, 60); // give Chrome's engine a tick to actually process the cancel first
   } else {
@@ -358,7 +368,7 @@ function updateClock(elapsedMs) {
     if (soundOn.landmark) {
       playClick(1500, 0.08, 'sine', 0.12 * CLOCK_VOL_MULT);
       setTimeout(() => playClick(1900, 0.10, 'sine', 0.12 * CLOCK_VOL_MULT), 110);
-      speak(formatSpokenTime(totalSeconds));
+      speak(formatSpokenTime(totalSeconds), PRIORITY.TIME);
     }
   } else if (soundOn.seconds) {
     playClick(CLOCK_TICK_HZ, 0.025, 'sine', CLOCK_TICK_VOL); // subtle, high, out of the way of the coaching tones
